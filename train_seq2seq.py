@@ -6,6 +6,8 @@ import sys
 import json
 import os
 
+import numpy as np
+
 from argparse import ArgumentParser
 from transformers import (
     AutoTokenizer,
@@ -15,7 +17,7 @@ from transformers import (
     Seq2SeqTrainer,
 )
 
-from common import load_data, compute_metrics, compute_metrics_for_texts
+from common import load_data, compute_metrics_for_texts
 
 
 # Avoid "huggingface/tokenizers: The current process just got forked" warning
@@ -46,12 +48,23 @@ def preprocess(data, tokenizer):
         'truncation': True,
         'max_length': MAX_LEN,
     }
-    
+
     inputs = tokenizer(input_texts, **tokenizer_args)
     outputs = tokenizer(text_target=output_texts, **tokenizer_args)
 
     inputs['labels'] = outputs['input_ids']
     return inputs
+
+
+def compute_metrics(preds_and_refs, tokenizer):
+    pred_ids, ref_ids = preds_and_refs
+
+    # -100 can't be decoded, so replace with pad id
+    ref_ids = np.where(ref_ids != -100, ref_ids, tokenizer.pad_token_id)
+    preds = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+    refs = tokenizer.batch_decode(ref_ids, skip_special_tokens=True)
+
+    return compute_metrics_for_texts(preds, refs)
 
 
 def main(argv):
@@ -68,24 +81,26 @@ def main(argv):
         references=dataset['validation']['output'],
     )
     print('validation metrics:', result)
-    
+
     if args.max_train_examples is not None:
-        dataset['train'] = dataset['train'].select(range(args.max_train_examples))
-    
+        limit = args.max_train_examples
+        dataset['train'] = dataset['train'].select(range(limit))
+
     dataset = dataset.map(
         lambda d: preprocess(d, tokenizer),
         batched=True
     )
-    
+
     train_args = Seq2SeqTrainingArguments(
         learning_rate=args.learning_rate,
-        output_dir='results',
+        output_dir='output',
+        logging_dir='logs',
         per_device_train_batch_size=8,
         per_device_eval_batch_size=8,
         predict_with_generate=True,
         evaluation_strategy='steps',
+        logging_strategy='steps',
         num_train_epochs=1,
-        logging_dir='logs',
         logging_steps=1000,
         eval_steps=1000,
         save_strategy='no',
