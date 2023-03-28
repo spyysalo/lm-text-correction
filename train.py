@@ -1,12 +1,15 @@
 #!/usr/bin/python3
 
-import sys
-import json
-import random
+# Training causal model for error correction
 
+import sys
+import os
+
+import numpy as np
+
+from logging import warning
 from argparse import ArgumentParser
 
-from sentence_splitter import SentenceSplitter
 from datasets import Dataset
 from transformers import (
     AutoTokenizer,
@@ -18,84 +21,80 @@ from transformers import (
     pipeline,
 )
 
+from common import load_data, compute_metrics_for_texts
 
-TEMPLATE = '''Korjaa teksti.
 
-Teksti: {}
+# Avoid "huggingface/tokenizers: The current process just got forked" warning
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-Korjattu: {}
+# Template for formatting data
+T_START = '''Korjaa virheet:
 
-Valmis.
+Teksti:
 '''
+
+T_MIDDLE = '''
+
+Korjattu:
+'''
+
+T_END = '''
+
+Valmis.'''
+
+MAX_LEN = 512 # TODO
 
 
 def argparser():
     ap = ArgumentParser()
+    ap.add_argument('--learning-rate', type=float, default=5e-05)
+    ap.add_argument('--max-train-examples', type=int, default=None)
+    ap.add_argument('--tokenizer', default=None)
     ap.add_argument('model')
     ap.add_argument('data')
-    ap.add_argument('--tokenizer', default=None)
-    ap.add_argument('--seed', type=int, default=42)
     return ap
 
 
-def load_documents(fn):
-    documents = []
-    with open(fn) as f:
-        for l in f:
-            documents.append(json.loads(l))
-    print(f'loaded {len(documents)} documents from {fn}', file=sys.stderr)
-    return documents
+def preprocess(data, tokenizer):
+    input_texts = data['input']
+    output_texts = data['output']
+
+    templated = []
+    for i, o in zip(input_texts, output_texts):
+        templated.append(T_START + i + T_MIDDLE + o + T_END)
+        
+    tokenized = tokenizer(
+        templated,
+        truncation=True,
+        max_length=MAX_LEN
+    )
+
+    return tokenized
 
 
-def split_documents(documents, train_ratio=0.95, seed=None):
-    documents = documents[:]
-    random.seed(seed)
-    random.shuffle(documents)
-    idx = int(len(documents)*train_ratio)
-    return documents[:idx], documents[idx:]
-
-
-def split_into_sentences(documents, max_chars=None, max_lines=None,
-                         max_sents=None, seed=None):
-    lines = [l for d in documents for l in d['text'].split('\n')]
-    lines = [l for l in lines if l and not l.isspace()]
-    
-    random.seed(seed)
-    random.shuffle(lines)
-
-    if max_lines is not None:
-        lines = lines[:max_lines]
-
-    splitter = SentenceSplitter(language='fi')
-
-    sentences = [s for l in lines for s in splitter.split(l)]
-    sentences = [s for s in sentences if s and not s.isspace()]
-
-    if max_chars is not None:
-        sentences = [s for s in sentences if len(s) <= max_chars]
-    
-    random.shuffle(sentences)
-    if max_sents is not None:
-        sentences = sentences[:max_sents]
-    
-    return sentences
-
-
-def add_errors(text, p=0.1):
-    chars = []
-    for c in text:
-        if random.random() > p:
-            chars.append(c)
-    text = ''.join(chars)
+def trim_to_output(text):
+    if text.startswith(T_START):
+        text = text[len(T_START):]
+    if T_MIDDLE in text:
+        text = text.split(T_MIDDLE)[1]
+    if T_END in text:
+        text = text.split(T_END)[0]
     return text
 
+        
+def compute_metrics(preds_and_refs, tokenizer):
+    preds, ref_ids = preds_and_refs
+    pred_ids = preds.argmax(axis=-1)
 
-def make_examples(texts, p=0.1):
-    examples = []
-    for t in texts:
-        e = add_errors(t, p)
-        examples.append(TEMPLATE.format(e, t))
-    return examples
+    # -100 can't be decoded, so replace with pad id
+    ref_ids = np.where(ref_ids != -100, ref_ids, tokenizer.pad_token_id)
+    preds = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+    refs = tokenizer.batch_decode(ref_ids, skip_special_tokens=True)
+
+    refs = [trim_to_output(t) for t in refs]
+    preds = [trim_to_output(t) for t in preds]
+    
+    return compute_metrics_for_texts(preds, refs)
 
 
 def main(argv):
@@ -103,72 +102,70 @@ def main(argv):
 
     if args.tokenizer is None:
         args.tokenizer = args.model
-    
+
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     model = AutoModelForCausalLM.from_pretrained(args.model)
+    model.max_length = MAX_LEN
+    
+    dataset = load_data(args.data)
 
-    docs = load_documents(args.data)
-    train_docs, valid_docs = split_documents(docs, seed=args.seed)
-
-    train_sents = split_into_sentences(
-        train_docs,
-        max_chars=250,
-        #max_lines=100000,
-        #max_sents=100000,
-        seed=args.seed
+    # report validation metrics for just copying input
+    result = compute_metrics_for_texts(
+        predictions=dataset['validation']['input'],
+        references=dataset['validation']['output'],
     )
-    valid_sents = split_into_sentences(
-        valid_docs,
-        max_chars=250,
-        max_lines=1000,
-        max_sents=1000,
-        seed=args.seed
+    print('validation metrics:', result)
+
+    if args.max_train_examples is not None:
+        limit = args.max_train_examples
+        dataset['train'] = dataset['train'].select(range(limit))
+
+    dataset = dataset.map(
+        lambda d: preprocess(d, tokenizer),
+        batched=True
     )
 
-    train_examples = make_examples(train_sents)
-    valid_examples = make_examples(valid_sents)
-
-    train_data = Dataset.from_dict({ 'text': train_examples })
-    valid_data = Dataset.from_dict({ 'text': valid_examples })
-
-    tokenize = lambda d: tokenizer(d['text'], truncation=True)
-    train_data = train_data.map(tokenize)
-    valid_data = valid_data.map(tokenize)
+    training_args = TrainingArguments(
+        learning_rate=args.learning_rate,
+        output_dir='output',
+        logging_dir='logs',
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=16,
+        eval_accumulation_steps=1,
+        evaluation_strategy='steps',
+        logging_strategy='steps',
+        weight_decay=0.01,
+        eval_steps=1000,
+        logging_steps=1000,
+        save_strategy='no',
+        #save_total_limit=5,
+        #save_steps=1000,
+    )
 
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False
     )
 
-    training_args = TrainingArguments(
-        output_dir='output',
-        evaluation_strategy='steps',
-        logging_strategy='steps',
-        learning_rate=1e-5,    # 2e-5
-        weight_decay=0.01,
-        eval_steps=1000,
-        logging_steps=1000,
-        save_steps=5000,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=32,
-        max_steps=100000,
-    )
-
     trainer = Trainer(
         model=model,
+        tokenizer=tokenizer,
         args=training_args,
-        train_dataset=train_data,
-        eval_dataset=valid_data,
+        train_dataset=dataset['train'],
+        eval_dataset=dataset['validation'],
         data_collator=data_collator,
+        compute_metrics=lambda o: compute_metrics(o, tokenizer),
     )
 
     trainer.train()
 
-    valid_results = trainer.evaluate(valid_data)
+    valid_results = trainer.evaluate(dataset['validation'])
     print('FINAL VALIDATION LOSS:', valid_results['eval_loss'])
+    print('FINAL VALIDATION CER:', valid_results['eval_cer_score'])
+    print('FINAL VALIDATION WER:', valid_results['eval_wer'])
 
     trainer.save_model('trained-model')
-    
+
     pipe = pipeline(
         'text-generation',
         model=model,
@@ -176,7 +173,7 @@ def main(argv):
         device=model.device
     )
 
-    text = 'Korjaa teksti.\n\nTeksti: Turu sntyi urajoen sulle j ene 1200lukua a s o Smen anhinkaunki.\n\nKorjattu:'
+    text = T_START + 'Turu sntyi urajoen sulle j ene 1200lukua a s o Smen anhinkaunki.' + T_MIDDLE
 
     print(pipe(text, max_new_tokens=25)[0]['generated_text'])
 
