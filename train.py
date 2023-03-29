@@ -62,7 +62,7 @@ def preprocess(data, tokenizer):
     templated = []
     for i, o in zip(input_texts, output_texts):
         templated.append(T_START + i + T_MIDDLE + o + T_END)
-        
+
     tokenized = tokenizer(
         templated,
         truncation=True,
@@ -73,28 +73,34 @@ def preprocess(data, tokenizer):
 
 
 def trim_to_output(text):
-    if text.startswith(T_START):
-        text = text[len(T_START):]
+    if T_START in text:
+        text = text.split(T_START)[1]
     if T_MIDDLE in text:
         text = text.split(T_MIDDLE)[1]
     if T_END in text:
         text = text.split(T_END)[0]
     return text
 
-        
+
 def compute_metrics(preds_and_refs, tokenizer):
-    preds, ref_ids = preds_and_refs
-    pred_ids = preds.argmax(axis=-1)
+    pred_ids, ref_ids = preds_and_refs
 
     # -100 can't be decoded, so replace with pad id
     ref_ids = np.where(ref_ids != -100, ref_ids, tokenizer.pad_token_id)
+    pred_ids = np.where(pred_ids != -100, pred_ids, tokenizer.pad_token_id)
+
     preds = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
     refs = tokenizer.batch_decode(ref_ids, skip_special_tokens=True)
 
     refs = [trim_to_output(t) for t in refs]
     preds = [trim_to_output(t) for t in preds]
-    
+
     return compute_metrics_for_texts(preds, refs)
+
+
+def logits_argmax(logits, labels):
+    # https://github.com/huggingface/transformers/issues/15466
+    return logits.argmax(axis=-1)
 
 
 def main(argv):
@@ -106,7 +112,7 @@ def main(argv):
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     model = AutoModelForCausalLM.from_pretrained(args.model)
     model.max_length = MAX_LEN
-    
+
     dataset = load_data(args.data)
 
     # report validation metrics for just copying input
@@ -131,7 +137,7 @@ def main(argv):
         logging_dir='logs',
         per_device_train_batch_size=8,
         per_device_eval_batch_size=16,
-        eval_accumulation_steps=1,
+        #eval_accumulation_steps=1,
         evaluation_strategy='steps',
         logging_strategy='steps',
         weight_decay=0.01,
@@ -155,6 +161,7 @@ def main(argv):
         eval_dataset=dataset['validation'],
         data_collator=data_collator,
         compute_metrics=lambda o: compute_metrics(o, tokenizer),
+        preprocess_logits_for_metrics=logits_argmax,
     )
 
     trainer.train()
