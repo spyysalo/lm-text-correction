@@ -38,10 +38,6 @@ T_MIDDLE = '''
 Korjattu:
 '''
 
-T_END = '''
-
-Valmis.'''
-
 MAX_LEN = 512 # TODO
 
 
@@ -61,7 +57,9 @@ def preprocess(data, tokenizer):
 
     templated = []
     for i, o in zip(input_texts, output_texts):
-        templated.append(T_START + i + T_MIDDLE + o + T_END)
+        prompt = T_START + i + T_MIDDLE + tokenizer.bos_token
+        output = o + tokenizer.eos_token
+        templated.append(prompt+output)
 
     tokenized = tokenizer(
         templated,
@@ -72,13 +70,14 @@ def preprocess(data, tokenizer):
     return tokenized
 
 
-def trim_to_output(text):
-    if T_START in text:
-        text = text.split(T_START)[1]
-    if T_MIDDLE in text:
-        text = text.split(T_MIDDLE)[1]
-    if T_END in text:
-        text = text.split(T_END)[0]
+def trim_to_output(text, tokenizer):
+    orig_text = text
+    if tokenizer.bos_token in text:
+        text = text.split(tokenizer.bos_token)[-1]
+    if tokenizer.eos_token in text:
+        text = text.split(tokenizer.eos_token)[0]
+    if not text:
+        warning(f'emptied: {orig_text}')
     return text
 
 
@@ -89,11 +88,11 @@ def compute_metrics(preds_and_refs, tokenizer):
     ref_ids = np.where(ref_ids != -100, ref_ids, tokenizer.pad_token_id)
     pred_ids = np.where(pred_ids != -100, pred_ids, tokenizer.pad_token_id)
 
-    preds = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
-    refs = tokenizer.batch_decode(ref_ids, skip_special_tokens=True)
+    preds = tokenizer.batch_decode(pred_ids) #, skip_special_tokens=True)
+    refs = tokenizer.batch_decode(ref_ids) #, skip_special_tokens=True)
 
-    refs = [trim_to_output(t) for t in refs]
-    preds = [trim_to_output(t) for t in preds]
+    refs = [trim_to_output(t, tokenizer) for t in refs]
+    preds = [trim_to_output(t, tokenizer) for t in preds]
 
     return compute_metrics_for_texts(preds, refs)
 
@@ -103,6 +102,26 @@ def logits_argmax(logits, labels):
     return logits.argmax(axis=-1)
 
 
+class PromptMaskingDataCollator(DataCollatorForLanguageModeling):
+    def __call__(self, features, return_tensors=None):
+        data = super().__call__(features, return_tensors)
+
+        # -100 labels for prompt (everything up to and including bos)
+        bos_token = self.tokenizer.bos_token
+        bos_token_id = self.tokenizer.convert_tokens_to_ids(bos_token)
+
+        # https://github.com/pytorch/pytorch/issues/9413#issuecomment-406030626
+        is_bos_token_id = (data['labels'] == bos_token_id)
+        bos_indices = is_bos_token_id.nonzero()
+        for i, j in bos_indices.tolist():
+            # TODO this should really be j+1 but that would mask the
+            # BOS which would mess up the current implementation of
+            # trim_to_output
+            data['labels'][i,:j] = -100
+
+        return data
+
+
 def main(argv):
     args = argparser().parse_args(argv[1:])
 
@@ -110,6 +129,8 @@ def main(argv):
         args.tokenizer = args.model
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    #tokenizer.padding_side = 'right'
+
     model = AutoModelForCausalLM.from_pretrained(args.model)
     model.max_length = MAX_LEN
 
@@ -148,7 +169,7 @@ def main(argv):
         #save_steps=1000,
     )
 
-    data_collator = DataCollatorForLanguageModeling(
+    data_collator = PromptMaskingDataCollator(
         tokenizer=tokenizer,
         mlm=False
     )
@@ -180,7 +201,7 @@ def main(argv):
         device=model.device
     )
 
-    text = T_START + 'Turu sntyi urajoen sulle j ene 1200lukua a s o Smen anhinkaunki.' + T_MIDDLE
+    text = T_START + 'Turu sntyi urajoen sulle j ene 1200lukua a s o Smen anhinkaunki.' + T_MIDDLE + tokenizer.bos_token
 
     print(pipe(text, max_new_tokens=25)[0]['generated_text'])
 
