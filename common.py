@@ -4,22 +4,20 @@ import datasets
 import evaluate
 
 
-def load_data(fn, test_size=1000, seed=42):
-    dataset = datasets.load_dataset('json', data_files=fn)
+def load_data(train_fn, valid_fn, max_train=None, max_valid=None):
+    train_dataset = datasets.Dataset.from_json(train_fn)
+    valid_dataset = datasets.Dataset.from_json(valid_fn)
 
-    split = dataset['train'].train_test_split(
-        test_size=test_size,
-        shuffle=False,    # in case data is ordered split sentences
-        seed=seed,
-    )
+    # Note! Intentionally not shuffling
+    if max_train is not None:
+        train_dataset = train_dataset.select(range(max_train))
+    if max_valid is not None:
+        valid_dataset = valid_dataset.select(range(max_valid))
 
-    # rename
     dataset = datasets.DatasetDict({
-        'train': split['train'],
-        'validation': split['test'],
+        'train': train_dataset,
+        'validation': valid_dataset,
     })
-
-    dataset = dataset.shuffle(seed=seed)
 
     return dataset
 
@@ -28,18 +26,26 @@ def compute_metrics_for_texts(predictions, references):
     char_metric = evaluate.load('character')
     word_metric = evaluate.load('wer')
 
-    print(predictions[:10])
-    print(references[:10])
+    for i in range(10):
+        print('GOLD:', references[i])
+        print('PRED:', predictions[i])
+        print('---')
 
-    char_result = char_metric.compute(
-        predictions=predictions,
-        references=references
-    )
+    try:
+        char_result = char_metric.compute(
+            predictions=predictions,
+            references=references
+        )
+    except:
+        char_result = { 'cer_score': float('inf') }
 
-    word_result = word_metric.compute(
-        predictions=predictions,
-        references=references
-    )
+    try:
+        word_result = word_metric.compute(
+            predictions=predictions,
+            references=references
+        )
+    except:
+        word_result = { 'wer': float('inf') }
 
     return {
         'cer_score': char_result['cer_score'],
