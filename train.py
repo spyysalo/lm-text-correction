@@ -28,26 +28,22 @@ from common import load_data, compute_metrics_for_texts
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Template for formatting data
-T_START = '''Korjaa virheet:
+T_START = 'Input:\n'
 
-Teksti:
-'''
+T_MIDDLE = '\n\nOutput:\n'
 
-T_MIDDLE = '''
-
-Korjattu:
-'''
-
-MAX_LEN = 512 # TODO
+#MAX_LEN = 512 # TODO
 
 
 def argparser():
     ap = ArgumentParser()
     ap.add_argument('--learning-rate', type=float, default=5e-05)
     ap.add_argument('--max-train-examples', type=int, default=None)
+    ap.add_argument('--max-valid-examples', type=int, default=None)
     ap.add_argument('--tokenizer', default=None)
     ap.add_argument('model')
-    ap.add_argument('data')
+    ap.add_argument('train_data')
+    ap.add_argument('valid_data')
     return ap
 
 
@@ -61,24 +57,38 @@ def preprocess(data, tokenizer):
         output = o + tokenizer.eos_token
         templated.append(prompt+output)
 
-    tokenized = tokenizer(
-        templated,
-        truncation=True,
-        max_length=MAX_LEN
-    )
+    # Truncation would be problematic for this task
+    tokenized = tokenizer(templated, truncation=False)
 
     return tokenized
 
 
-def trim_to_output(text, tokenizer):
-    orig_text = text
-    if tokenizer.bos_token in text:
-        text = text.split(tokenizer.bos_token)[-1]
-    if tokenizer.eos_token in text:
-        text = text.split(tokenizer.eos_token)[0]
-    if not text:
-        warning(f'emptied: {orig_text}')
-    return text
+def get_outputs(ref_ids, pred_ids, tokenizer):
+    ref_ids, pred_ids = ref_ids.tolist(), pred_ids.tolist()
+
+    # remove prompts (everything up to the first bos in labels)
+    for i in range(len(ref_ids)):
+        o = ref_ids[i].index(tokenizer.bos_token_id)
+        ref_ids[i] = ref_ids[i][o+1:]
+        pred_ids[i] = pred_ids[i][o:]    # labels are shifted + 1
+
+    # remove everything starting at the first eos
+    for i in range(len(ref_ids)):
+        try:
+            o = ref_ids[i].index(tokenizer.eos_token_id)
+            ref_ids[i] = ref_ids[i][:o]
+        except:
+            warning(f'missing eos in refs {i}')
+
+    for i in range(len(pred_ids)):
+        try:
+            o = pred_ids[i].index(tokenizer.eos_token_id)
+            pred_ids[i] = pred_ids[i][:o]
+        except:
+            pass    # preds don't necessarily have eos
+
+
+    return ref_ids, pred_ids
 
 
 def compute_metrics(preds_and_refs, tokenizer):
@@ -88,11 +98,10 @@ def compute_metrics(preds_and_refs, tokenizer):
     ref_ids = np.where(ref_ids != -100, ref_ids, tokenizer.pad_token_id)
     pred_ids = np.where(pred_ids != -100, pred_ids, tokenizer.pad_token_id)
 
+    ref_ids, pred_ids = get_outputs(ref_ids, pred_ids, tokenizer)
+
     preds = tokenizer.batch_decode(pred_ids) #, skip_special_tokens=True)
     refs = tokenizer.batch_decode(ref_ids) #, skip_special_tokens=True)
-
-    refs = [trim_to_output(t, tokenizer) for t in refs]
-    preds = [trim_to_output(t, tokenizer) for t in preds]
 
     return compute_metrics_for_texts(preds, refs)
 
@@ -106,18 +115,16 @@ class PromptMaskingDataCollator(DataCollatorForLanguageModeling):
     def __call__(self, features, return_tensors=None):
         data = super().__call__(features, return_tensors)
 
-        # -100 labels for prompt (everything up to and including bos)
-        bos_token = self.tokenizer.bos_token
-        bos_token_id = self.tokenizer.convert_tokens_to_ids(bos_token)
-
-        # https://github.com/pytorch/pytorch/issues/9413#issuecomment-406030626
-        is_bos_token_id = (data['labels'] == bos_token_id)
-        bos_indices = is_bos_token_id.nonzero()
-        for i, j in bos_indices.tolist():
-            # TODO this should really be j+1 but that would mask the
-            # BOS which would mess up the current implementation of
-            # trim_to_output
-            data['labels'][i,:j] = -100
+        bos_token_id = self.tokenizer.bos_token_id
+        for i in range(len(data['labels'])):
+            bos_indices = np.where(data['labels'][i] == bos_token_id)[0]
+            if len(bos_indices) > 0:
+                # TODO this should really be bos_indices[0]+1 but that
+                # would mask the BOS which would mess up the current
+                # logic for separating the prompt from the output
+                data['labels'][i,:bos_indices[0]] = -100
+            else:
+                warning('missing BOS/-100 in labels')
 
         return data
 
@@ -130,18 +137,31 @@ def main(argv):
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     #tokenizer.padding_side = 'right'
-
     model = AutoModelForCausalLM.from_pretrained(args.model)
-    model.max_length = MAX_LEN
+    #model.max_length = MAX_LEN
 
-    dataset = load_data(args.data)
+    # If we don't have a pad_token, add a new one. Note that we want
+    # to avoid reusing eos_token or bos_token because that would lead
+    # to these being replaced with -100 in labels, which would mess
+    # with the logic for isolating the output from the prompt.
+    # (ditto for unk_token b/c that can match bos or eos.)
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
+        model.resize_token_embeddings(len(tokenizer))
+
+    dataset = load_data(
+        args.train_data,
+        args.valid_data,
+        max_train=args.max_train_examples,
+        max_valid=args.max_valid_examples,
+    )
 
     # report validation metrics for just copying input
     result = compute_metrics_for_texts(
         predictions=dataset['validation']['input'],
         references=dataset['validation']['output'],
     )
-    print('validation metrics:', result)
+    print('validation metrics for copy:', result)
 
     if args.max_train_examples is not None:
         limit = args.max_train_examples
@@ -152,16 +172,22 @@ def main(argv):
         batched=True
     )
 
+    for s in ('train', 'validation'):
+        print(f'max {s} input_ids length',
+              max(len(i) for i in dataset[s]['input_ids']))
+
     training_args = TrainingArguments(
         learning_rate=args.learning_rate,
         output_dir='output',
         logging_dir='logs',
         per_device_train_batch_size=8,
+        #gradient_accumulation_steps=2,
         per_device_eval_batch_size=16,
         #eval_accumulation_steps=1,
         evaluation_strategy='steps',
         logging_strategy='steps',
         weight_decay=0.01,
+        num_train_epochs=1,
         eval_steps=1000,
         logging_steps=1000,
         save_strategy='no',
