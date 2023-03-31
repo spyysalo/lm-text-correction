@@ -9,7 +9,6 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 
 def argparser():
     ap = ArgumentParser()
-    ap.add_argument('tokenizer')
     ap.add_argument('model')
     return ap
 
@@ -77,7 +76,7 @@ def make_examples(texts, p=0.1):
 def main(argv):
     args = argparser().parse_args(argv[1:])
 
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model)
 
     pipe = pipeline(
@@ -87,9 +86,13 @@ def main(argv):
         device=model.device
     )
 
-    text = 'Korjaa teksti.\n\nTeksti: Turu sntyi urajoen sulle j enen 1200lukua ja s o Sumen anhinkaunki.\n\nKorjattu:'
+    #input_ = 'AFTER these pleafantries, having cut his throat from ear to ear, with all the dexterity of a surgeon, without condescending to cast another\'look at him, I walked on with my compa- nion, and leftTHYRSiss flone-dead upon the pavement.'
 
-    print(pipe(text, max_new_tokens=25)[0]['generated_text'])
+    input_ = '''For thither, I am ,:tdl.tl e Jng rsijlid, And'i ire'he will repair'this Day's wide Breach. CitUzp"".s aways love-t~a.e, pious Prmces,.And ,fuc as ' hr ji iig,, like themselves. Then, if you can, ecter it Townb'efore 'em,'''
+
+    text = f'Korjaa virheet:\n\nTeksti: {input_}\n\nKorjattu:'
+
+    print(pipe(text, max_new_tokens=100)[0]['generated_text'])
 
 
 if __name__ == '__main__':
