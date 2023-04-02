@@ -32,7 +32,8 @@ T_START = 'Input:\n'
 
 T_MIDDLE = '\n\nOutput:\n'
 
-#MAX_LEN = 512 # TODO
+# Maximum "reasonable" sequence length
+MAX_MAX_LENGTH = 2**16
 
 
 def argparser():
@@ -53,8 +54,8 @@ def preprocess(data, tokenizer):
 
     templated = []
     for i, o in zip(input_texts, output_texts):
-        prompt = T_START + i + T_MIDDLE + tokenizer.bos_token
-        output = o + tokenizer.eos_token
+        prompt = T_START + i + T_MIDDLE + tokenizer.sep_token
+        output = o + tokenizer.sep_token
         templated.append(prompt+output)
 
     # Truncation would be problematic for this task
@@ -66,27 +67,26 @@ def preprocess(data, tokenizer):
 def get_outputs(ref_ids, pred_ids, tokenizer):
     ref_ids, pred_ids = ref_ids.tolist(), pred_ids.tolist()
 
-    # remove prompts (everything up to the first bos in labels)
+    # remove prompts (everything up to the first sep in labels)
     for i in range(len(ref_ids)):
-        o = ref_ids[i].index(tokenizer.bos_token_id)
+        o = ref_ids[i].index(tokenizer.sep_token_id)
         ref_ids[i] = ref_ids[i][o+1:]
         pred_ids[i] = pred_ids[i][o:]    # labels are shifted + 1
 
-    # remove everything starting at the first eos
+    # remove everything starting at the first remaining sep
     for i in range(len(ref_ids)):
         try:
-            o = ref_ids[i].index(tokenizer.eos_token_id)
+            o = ref_ids[i].index(tokenizer.sep_token_id)
             ref_ids[i] = ref_ids[i][:o]
         except:
-            warning(f'missing eos in refs {i}')
+            warning(f'missing sep in refs {i}')
 
     for i in range(len(pred_ids)):
         try:
-            o = pred_ids[i].index(tokenizer.eos_token_id)
+            o = pred_ids[i].index(tokenizer.sep_token_id)
             pred_ids[i] = pred_ids[i][:o]
         except:
-            pass    # preds don't necessarily have eos
-
+            pass    # preds don't necessarily have sep
 
     return ref_ids, pred_ids
 
@@ -115,18 +115,51 @@ class PromptMaskingDataCollator(DataCollatorForLanguageModeling):
     def __call__(self, features, return_tensors=None):
         data = super().__call__(features, return_tensors)
 
-        bos_token_id = self.tokenizer.bos_token_id
+        sep_token_id = self.tokenizer.sep_token_id
         for i in range(len(data['labels'])):
-            bos_indices = np.where(data['labels'][i] == bos_token_id)[0]
-            if len(bos_indices) > 0:
-                # TODO this should really be bos_indices[0]+1 but that
-                # would mask the BOS which would mess up the current
+            sep_indices = np.where(data['labels'][i] == sep_token_id)[0]
+            if len(sep_indices) > 0:
+                # TODO this should really be sep_indices[0]+1 but that
+                # would mask the sep which would mess up the current
                 # logic for separating the prompt from the output
-                data['labels'][i,:bos_indices[0]] = -100
+                data['labels'][i,:sep_indices[0]] = -100
             else:
-                warning('missing BOS/-100 in labels')
+                warning('missing sep in labels')
 
         return data
+
+
+def get_max_length(model, tokenizer):
+    model_max_length = model.config.max_position_embeddings
+    tokenizer_max_length = tokenizer.model_max_length
+
+    if model_max_length > MAX_MAX_LENGTH:
+        warning(f'model.config.max_position_embeddings is {model_max_length}')
+    if tokenizer_max_length > MAX_MAX_LENGTH:
+        warning(f'tokenizer.model_max_length is {tokenizer_max_length}')
+
+    max_length = min(model_max_length, tokenizer_max_length)
+
+    if max_length > MAX_MAX_LENGTH:
+        raise ValueError(f'failed to get max length ({max_length})')
+    else:
+        return max_length
+
+
+def filter_by_length(datasetdict, max_length):
+    for k in datasetdict:
+        dataset = datasetdict[k]
+        filtered = dataset.filter(lambda e: len(e['input_ids']) <= max_length)
+        orig_length = len(dataset['input_ids'])
+        filt_length = len(filtered['input_ids'])
+        if filt_length < orig_length:
+            warning(
+                f'filtered {k} from {orig_length} to {filt_length}'
+                f'({filt_length/orig_length:.1%}) by max_length {max_length}'
+            )
+            datasetdict[k] = filtered
+
+    return datasetdict
 
 
 def main(argv):
@@ -138,16 +171,16 @@ def main(argv):
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     #tokenizer.padding_side = 'right'
     model = AutoModelForCausalLM.from_pretrained(args.model)
-    #model.max_length = MAX_LEN
 
-    # If we don't have a pad_token, add a new one. Note that we want
-    # to avoid reusing eos_token or bos_token because that would lead
-    # to these being replaced with -100 in labels, which would mess
-    # with the logic for isolating the output from the prompt.
-    # (ditto for unk_token b/c that can match bos or eos.)
+    max_length = get_max_length(model, tokenizer)
+    print(f'using max_length {max_length}')
+
+    # add special tokens if necessary
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
-        model.resize_token_embeddings(len(tokenizer))
+    if tokenizer.sep_token is None:
+        tokenizer.add_special_tokens({'sep_token': '<|sep|>'})
+    model.resize_token_embeddings(len(tokenizer))
 
     dataset = load_data(
         args.train_data,
@@ -163,18 +196,20 @@ def main(argv):
     )
     print('validation metrics for copy:', result)
 
-    if args.max_train_examples is not None:
-        limit = args.max_train_examples
-        dataset['train'] = dataset['train'].select(range(limit))
-
     dataset = dataset.map(
         lambda d: preprocess(d, tokenizer),
         batched=True
     )
+    dataset = filter_by_length(dataset, max_length)
 
     for s in ('train', 'validation'):
         print(f'max {s} input_ids length',
               max(len(i) for i in dataset[s]['input_ids']))
+
+    print(
+        'example example:\n'+
+        tokenizer.decode(dataset['train']['input_ids'][0]),
+    )
 
     training_args = TrainingArguments(
         learning_rate=args.learning_rate,
@@ -193,6 +228,8 @@ def main(argv):
         save_strategy='no',
         #save_total_limit=5,
         #save_steps=1000,
+        #bf16=True,
+        #gradient_checkpointing=True,
     )
 
     data_collator = PromptMaskingDataCollator(
@@ -227,7 +264,7 @@ def main(argv):
         device=model.device
     )
 
-    text = T_START + 'Turu sntyi urajoen sulle j ene 1200lukua a s o Smen anhinkaunki.' + T_MIDDLE + tokenizer.bos_token
+    text = T_START + 'Turu sntyi urajoen sulle j ene 1200lukua a s o Smen anhinkaunki.' + T_MIDDLE + tokenizer.sep_token
 
     print(pipe(text, max_new_tokens=25)[0]['generated_text'])
 
