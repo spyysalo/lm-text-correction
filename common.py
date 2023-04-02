@@ -9,9 +9,9 @@ def load_data(train_fn, valid_fn, max_train=None, max_valid=None):
     valid_dataset = datasets.Dataset.from_json(valid_fn)
 
     # Note! Intentionally not shuffling
-    if max_train is not None:
+    if max_train is not None and len(train_dataset) > max_train:
         train_dataset = train_dataset.select(range(max_train))
-    if max_valid is not None:
+    if max_valid is not None and len(valid_dataset) > max_valid:
         valid_dataset = valid_dataset.select(range(max_valid))
 
     dataset = datasets.DatasetDict({
