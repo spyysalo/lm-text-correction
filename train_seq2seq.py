@@ -33,8 +33,10 @@ def argparser():
     ap = ArgumentParser()
     ap.add_argument('--learning-rate', type=float, default=5e-05)
     ap.add_argument('--max-train-examples', type=int, default=None)
+    ap.add_argument('--max-valid-examples', type=int, default=None)
     ap.add_argument('model')
-    ap.add_argument('data')
+    ap.add_argument('train_data')
+    ap.add_argument('valid_data')
     return ap
 
 
@@ -73,23 +75,28 @@ def main(argv):
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForSeq2SeqLM.from_pretrained(args.model)
 
-    dataset = load_data(args.data)
+    dataset = load_data(
+        args.train_data,
+        args.valid_data,
+        max_train=args.max_train_examples,
+        max_valid=args.max_valid_examples,
+    )
 
     # report validation metrics for just copying input
     result = compute_metrics_for_texts(
         predictions=dataset['validation']['input'],
         references=dataset['validation']['output'],
     )
-    print('validation metrics:', result)
-
-    if args.max_train_examples is not None:
-        limit = args.max_train_examples
-        dataset['train'] = dataset['train'].select(range(limit))
+    print('validation metrics for copy:', result)
 
     dataset = dataset.map(
         lambda d: preprocess(d, tokenizer),
         batched=True
     )
+
+    for s in ('train', 'validation'):
+        print(f'max {s} input_ids length',
+              max(len(i) for i in dataset[s]['input_ids']))
 
     train_args = Seq2SeqTrainingArguments(
         learning_rate=args.learning_rate,
