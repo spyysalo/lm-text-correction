@@ -130,11 +130,16 @@ class PromptMaskingDataCollator(DataCollatorForLanguageModeling):
 
 
 def get_max_length(model, tokenizer):
-    model_max_length = model.config.max_position_embeddings
-    tokenizer_max_length = tokenizer.model_max_length
+    try:
+        model_max_length = model.config.max_position_embeddings
+        if model_max_length > MAX_MAX_LENGTH:
+            warning(f'model.config.max_position_embeddings is '
+                    f'{model_max_length}')
+    except AttributeError as e:
+        warning(f'failed to get max_position_embeddings: {e}')
+        model_max_length = 2**64    # something unreasonable
 
-    if model_max_length > MAX_MAX_LENGTH:
-        warning(f'model.config.max_position_embeddings is {model_max_length}')
+    tokenizer_max_length = tokenizer.model_max_length
     if tokenizer_max_length > MAX_MAX_LENGTH:
         warning(f'tokenizer.model_max_length is {tokenizer_max_length}')
 
@@ -154,7 +159,7 @@ def filter_by_length(datasetdict, max_length):
         filt_length = len(filtered['input_ids'])
         if filt_length < orig_length:
             warning(
-                f'filtered {k} from {orig_length} to {filt_length}'
+                f'filtered {k} from {orig_length} to {filt_length} '
                 f'({filt_length/orig_length:.1%}) by max_length {max_length}'
             )
             datasetdict[k] = filtered
