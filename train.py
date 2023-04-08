@@ -5,6 +5,7 @@
 import sys
 import os
 
+import torch
 import numpy as np
 
 from logging import warning
@@ -169,6 +170,8 @@ def filter_by_length(datasetdict, max_length):
 
 def main(argv):
     args = argparser().parse_args(argv[1:])
+
+    print('cuda available:', torch.cuda.is_available())
 
     if args.tokenizer is None:
         args.tokenizer = args.model
