@@ -3,6 +3,8 @@ import numpy as np
 import datasets
 import evaluate
 
+from logging import warning
+
 
 def load_data(train_fn, valid_fn, max_train=None, max_valid=None):
     train_dataset = datasets.Dataset.from_json(train_fn)
@@ -26,7 +28,7 @@ def compute_metrics_for_texts(predictions, references):
     char_metric = evaluate.load('character')
     word_metric = evaluate.load('wer')
 
-    for i in range(10):
+    for i in range(min(10, len(references))):
         print('GOLD:', references[i])
         print('PRED:', predictions[i])
         print('---')
@@ -36,7 +38,8 @@ def compute_metrics_for_texts(predictions, references):
             predictions=predictions,
             references=references
         )
-    except:
+    except Exception as e:
+        warning(f'error calculating cer_score: {e}')
         char_result = { 'cer_score': float('inf') }
 
     try:
@@ -44,7 +47,8 @@ def compute_metrics_for_texts(predictions, references):
             predictions=predictions,
             references=references
         )
-    except:
+    except Exception as e:
+        warning(f'error calculating wer: {e}')
         word_result = { 'wer': float('inf') }
 
     return {
