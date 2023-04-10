@@ -40,6 +40,9 @@ MAX_MAX_LENGTH = 2**16
 def argparser():
     ap = ArgumentParser()
     ap.add_argument('--learning-rate', type=float, default=5e-05)
+    ap.add_argument('--batch-size', type=int, default=8)
+    ap.add_argument('--gradient-accumulation-steps', type=int, default=1)
+    ap.add_argument('--gradient-checkpointing', action='store_true')
     ap.add_argument('--max-train-examples', type=int, default=None)
     ap.add_argument('--max-valid-examples', type=int, default=None)
     ap.add_argument('--tokenizer', default=None)
@@ -223,9 +226,9 @@ def main(argv):
         learning_rate=args.learning_rate,
         output_dir='output',
         logging_dir='logs',
-        per_device_train_batch_size=8,
-        #gradient_accumulation_steps=2,
-        per_device_eval_batch_size=16,
+        per_device_train_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        per_device_eval_batch_size=4,
         #eval_accumulation_steps=1,
         evaluation_strategy='steps',
         logging_strategy='steps',
@@ -237,7 +240,7 @@ def main(argv):
         #save_total_limit=5,
         #save_steps=1000,
         #bf16=True,
-        #gradient_checkpointing=True,
+        gradient_checkpointing=args.gradient_checkpointing,
     )
 
     data_collator = PromptMaskingDataCollator(
@@ -259,6 +262,10 @@ def main(argv):
     trainer.train()
 
     valid_results = trainer.evaluate(dataset['validation'])
+    print('MODEL:', args.model)
+    print('LEARGNING RATE:', args.learning_rate)
+    print('BATCH SIZE:', args.batch_size)
+    print('GRADIENT ACCUMULATION STEPS:', args.gradient_accumulation_steps)
     print('FINAL VALIDATION LOSS:', valid_results['eval_loss'])
     print('FINAL VALIDATION CER:', valid_results['eval_cer_score'])
     print('FINAL VALIDATION WER:', valid_results['eval_wer'])
