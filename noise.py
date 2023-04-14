@@ -28,10 +28,6 @@ def argparser():
 
 
 def add_noise(text, rng, args):
-    # TODO: insert_prob isn't accurate for delete_prob > 0, as the
-    # possibility of insertion is not considered if the deletion
-    # probability threshold is exceeded.
-
     # draw probability of error
     prob = rng.normal(args.mean, args.stdev)
     prob = min(max(prob, args.min_error_prob), args.max_error_prob)
@@ -54,6 +50,11 @@ def add_noise(text, rng, args):
 def main(argv):
     args = argparser().parse_args()
     args.charset = [c for c in args.charset]    # for np.random.choice
+
+    # Adjust inser_prob: as the possibility of insertion is only
+    # considered if the deletion probability threshold is not
+    # exceeded, it needs to be adjusted to match the CLI probability
+    args.insert_prob = args.insert_prob / (1-args.delete_prob)
 
     rng = np.random.default_rng(args.seed)
 
