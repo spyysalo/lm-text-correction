@@ -39,8 +39,10 @@ MAX_MAX_LENGTH = 2**16
 
 def argparser():
     ap = ArgumentParser()
+    ap.add_argument('--resume-from-checkpoint', action='store_true')
     ap.add_argument('--learning-rate', type=float, default=5e-05)
     ap.add_argument('--batch-size', type=int, default=8)
+    ap.add_argument('--num-train-epochs', type=int, default=1)
     ap.add_argument('--gradient-accumulation-steps', type=int, default=1)
     ap.add_argument('--gradient-checkpointing', action='store_true')
     ap.add_argument('--max-train-examples', type=int, default=None)
@@ -193,18 +195,22 @@ def main(argv):
         tokenizer.add_special_tokens({'sep_token': '<|sep|>'})
     model.resize_token_embeddings(len(tokenizer))
 
+    print('start loading data ...', file=sys.stderr, flush=True)
     dataset = load_data(
         args.train_data,
         args.valid_data,
         max_train=args.max_train_examples,
         max_valid=args.max_valid_examples,
     )
+    print('done loading data.', file=sys.stderr, flush=True)
 
     # report validation metrics for just copying input
+    print('start running metrics ...', file=sys.stderr, flush=True)
     result = compute_metrics_for_texts(
         predictions=dataset['validation']['input'],
         references=dataset['validation']['output'],
     )
+    print('done running metrics.', file=sys.stderr, flush=True)
     print('validation metrics for copy:', result)
 
     dataset = dataset.map(
@@ -233,12 +239,12 @@ def main(argv):
         evaluation_strategy='steps',
         logging_strategy='steps',
         weight_decay=0.01,
-        num_train_epochs=1,
+        num_train_epochs=args.num_train_epochs,
         eval_steps=1000,
         logging_steps=1000,
-        save_strategy='no',
-        #save_total_limit=5,
-        #save_steps=1000,
+        save_strategy='steps',
+        save_steps=1000,
+        save_total_limit=5,
         #bf16=True,
         gradient_checkpointing=args.gradient_checkpointing,
     )
@@ -259,7 +265,9 @@ def main(argv):
         preprocess_logits_for_metrics=logits_argmax,
     )
 
-    trainer.train()
+    trainer.train(
+        resume_from_checkpoint=args.resume_from_checkpoint,
+    )
 
     valid_results = trainer.evaluate(dataset['validation'])
     print('MODEL:', args.model)
