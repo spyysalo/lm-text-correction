@@ -47,6 +47,7 @@ def argparser():
     ap.add_argument('--gradient-checkpointing', action='store_true')
     ap.add_argument('--max-train-examples', type=int, default=None)
     ap.add_argument('--max-valid-examples', type=int, default=None)
+    ap.add_argument('--max-length', type=int, default=None)
     ap.add_argument('--tokenizer', default=None)
     ap.add_argument('model')
     ap.add_argument('train_data')
@@ -185,8 +186,11 @@ def main(argv):
     #tokenizer.padding_side = 'right'
     model = AutoModelForCausalLM.from_pretrained(args.model)
 
-    max_length = get_max_length(model, tokenizer)
-    print(f'using max_length {max_length}')
+    if args.max_length is not None:
+        max_length = args.max_length
+    else:
+        max_length = get_max_length(model, tokenizer)
+        print(f'using max_length {max_length}')
 
     # add special tokens if necessary
     if tokenizer.pad_token is None:
